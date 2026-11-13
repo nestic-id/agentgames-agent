@@ -84,26 +84,85 @@ Still UNVERIFIED for gatekeeper (resolve from ONE practice-mode sample):
   via `POSEIDON_INPUT_ORDER`).
 - Template name leaked by assert errors: `VfyPolicyProof` (instance `_154`).
 
-## UNRESOLVED — vfy-policy asserts at template lines 75 and 90
+## SOLVED 13 Nov 2026 — vfy-policy policy semantics (probes 7–12)
 
-- Line 75 depends ONLY on `strategyParams` (commitment recomputed to match
-  each time): all-zero params pass it; all-ones, all-twos, mixed 0/1/2,
-  all-tens, and [1..8] all fail it — independent of action/amount/state.
-  It is some params-validity constraint whose predicate we could not
-  identify black-box (not a simple per-param range or a small sum bound,
-  unless the bound is 0 — implausible; possibly a second hash/digest over
-  the params in a different arrangement, or a params-structure check).
-- Line 90 (reached with all-zero params) fails for every probed combination
-  of turn (0/1/20), balances (100/100, 0/0, 90/110), action (0/1/2),
-  amount (0/1/5/10/100), salt (0/1/7), circuitVersion (0/1/2).
-- Consequence: as of this build, a fabricated Steal witness does NOT yet
-  calculate end-to-end, so `scripts/selftest-proof.js` reports the Steal
-  proof as NOT YET GENERABLE and the service degrades per
-  `STEAL_PROOF_REQUIRED` (see README). ONE real practice-turn sample
-  (envelope + an accepted response, or the dashboard's commitment helper
-  output) should pin lines 75/90 down; the witness mapping is config-driven
-  (`src/witness-config.steal.json`) precisely so this can be fixed in
-  minutes.
+Method (SUPERAGENT sk57): single-position param scans from the all-zero
+base + structured pairs, then single-dimension scans around the first
+successful witnesses, then fullProve + VK verification. Probe scripts:
+`scripts/probe-signals7.js` … `probe-signals12.js`; raw logs in /tmp
+(probe7–probe10 results). The earlier "line 75 / line 90" framing was a
+misread caused by probing only uniform param vectors: the all-zero
+vector is simply INVALID (params[0] = 0 breaks the range assert), and
+lines 75–78 are four separate asserts, one per params[4..7].
+
+### Params semantics (all verified by witness calculation)
+
+- `strategyParams[4]`, `[5]`, `[6]`, `[7]` must be exactly **0** —
+  asserted individually at template lines 75, 76, 77, 78 (any nonzero
+  value, including p−1, fails its line).
+- `strategyParams[0]` = **EXTRACT amount**, valid range **1..10**:
+  ≥1 enforced ~line 89/90 (GreaterEqThan component), ≤10 ~line 95
+  (LessThan); values ≥ ~20 fail inside the comparator's Num2Bits
+  (line 38 of the comparator template). This was the real "line 90"
+  blocker: params[0]=0 can never witness.
+- `strategyParams[3]` ∈ {0,1} — boolean, asserted ~line 98
+  (value ≥2 fails there).
+- `strategyParams[1]`, `[2]` — thresholds (no tight validity bound
+  found; 1000 works).
+
+### The circuit's policy is a decision list (line ~140 = branch assert,
+### line ~149 = EXTRACT amount assert)
+
+Evaluated in strict priority order (verified by overlap tests):
+
+1. `selfBalance < strategyParams[1]` → action must be **FORTIFY**
+   (amount 0). Wins over every other branch — fires even at
+   opponentBalance = 0 and even when params[3] = 1. Strict `<`:
+   params[1]=10, self=10 does NOT fortify; self=5 does.
+2. else `opponentBalance <= strategyParams[2]` **OR**
+   `strategyParams[3] == 1` → action must be **HOLD** (amount 0).
+   Boundary: opponentBalance == params[2] holds; params[2]+1 extracts.
+3. else → action must be **EXTRACT** with `amount == strategyParams[0]`
+   EXACTLY (line 149) — NOT min(params[0], opponentBalance): with
+   params[0]=10 and opponentBalance=5, amount=10 proves and amount=5
+   fails. The game resolver caps the actual take ("steals up to N").
+
+Any (params, state, action, amount) combination that is not the
+decision-list output for that state fails the line-140 assert. The
+circuit therefore forces exactly one provable action per state — there
+is no freedom to deviate, by design.
+
+Free inputs (no in-circuit validity constraint found): `matchId`,
+`turnNumber` (0..100 probed), `circuitVersion` (0..2^32 probed), `salt`.
+
+### Public signals layout (from fullProve output, verified)
+
+`public_signals` (9) = `[digest, commitment, matchId, turnNumber,
+selfBalance, opponentBalance, action, amount, circuitVersion]`.
+Private inputs: `salt` + `strategyParams[8]` (9 elements). `digest` is a
+circuit-computed output binding the turn; six Poseidon arrangements
+over the public fields were tested and none matched (probe12) — its
+exact formula is undetermined and unnecessary (snarkjs emits it).
+
+### Registered strategy (post-fix)
+
+`STRATEGY_PARAMS = [10,0,0,0,0,0,0,0]` — decision list reduces to
+EXTRACT 10 whenever opponentBalance > 0, HOLD at opponentBalance = 0:
+exactly STEAL-STRATEGY.md's shipped policy (the game's real EXTRACT cap
+is 10, SPEC §5.1). The previously registered all-zero commitment
+(0x052a5902…cd287d3d) could NEVER produce a valid proof (params[0]=0);
+it was superseded 13 Nov 2026 by the commitment for the new params
+(0x158073b6…0d95119f, dashboard-verified ACTIVE, circuit v1 · policy v1,
+computed in the box from the existing salt).
+
+### End-to-end evidence
+
+Groth16 proofs generated with `vfy-policy_final.zkey` and VERIFIED
+against the official VK for: EXTRACT (100/100 and opp=5 cases), HOLD
+(opponentBalance=0), HOLD via params[3]=1, FORTIFY (params[1]=100,
+self=5) — `scripts/probe-signals11.js`. The agent's own HTTP service
+generates + attaches verifying proofs for EXTRACT and HOLD turns
+(`npm test`, 19/19, local + box).
 
 ## HMAC (from SPEC §3, still UNVERIFIED)
 
