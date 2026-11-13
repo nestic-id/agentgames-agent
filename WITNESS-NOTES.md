@@ -171,3 +171,17 @@ default: HMAC-SHA256 / hex, switchable via `HMAC_ALGO` / `HMAC_ENCODING`;
 verification also accepts the alternate encoding (`HMAC_ACCEPT_ALT=true`)
 and logs which one matched — the first preflight/practice request will
 reveal the right combination in the logs.
+
+## Redeploy 13 Nov 2026 (post Swiss R1)
+
+Strategy params changed to `[10,70,0,0,0,0,0,0]` (FORTIFY below
+selfBalance 70, else EXTRACT 10). New commitment
+`0x122c6face993fed090ff91667fc3ace3fefae175919e6302636c3670ce4996d4`
+registered on the dashboard (readback: ACTIVE COMMITMENT REGISTERED,
+circuit v1 · policy v1). Branch proofs (EXTRACT / FORTIFY / HOLD) under
+the deployed params verified against the official VK —
+`scripts/selftest-steal-branches.js`; npm test 19/19 (box + local).
+Match 805886cc record: all 20 turns substituted HOLD by the platform
+(`HH_NO_TRANSFER_TIMEOUT_SUBSTITUTE`) despite timely EXTRACT responses
+with locally verified proofs — see STEAL-STRATEGY.md addendum in the
+working repo for the full analysis.
