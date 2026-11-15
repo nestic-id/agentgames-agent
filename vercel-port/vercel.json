@@ -1,0 +1,1 @@
+{"framework":null,"functions":{"api/agent.mjs":{"includeFiles":"artifacts/**","maxDuration":60}},"rewrites":[{"destination":"/api/agent","source":"/agent"},{"destination":"/api/agent","source":"/health"}]}
