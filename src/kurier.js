@@ -26,6 +26,12 @@ function digDeep(obj, keys) {
   return undefined;
 }
 
+// On-chain reference carried by a submit/job payload, if any.
+function extractRef(raw) {
+  const ref = digDeep(raw, ["txHash", "transactionHash", "proofReference", "hash"]);
+  return ref ? String(ref) : null;
+}
+
 class KurierClient {
   constructor(cfg, log) {
     this.cfg = cfg;
@@ -106,4 +112,62 @@ class KurierClient {
   }
 }
 
-module.exports = { KurierClient };
+// Fire-and-forget Kurier submission with background finalization
+// tracking (decoupled from the HTTP response path 15 Nov 2026: awaiting
+// Finalized cost 20–31s per Gatekeeper task vs a 15s practice deadline,
+// while Finalized status has never changed the platform's verified-proof
+// count). Starts the submit immediately and returns its promise so a
+// caller may race it briefly for data carried by the submit response
+// itself; the background tracker then owns the submission, polls to
+// Finalized with the full wait budget, and logs every outcome with the
+// [kurier-bg] prefix. Never throws and never leaves an unhandled
+// rejection: a Kurier failure in the background cannot crash the process
+// or touch a response that has already been sent.
+function submitTracked(kurier, log, label, args) {
+  let submitPromise;
+  try {
+    submitPromise = kurier.submitProof(args);
+  } catch (e) {
+    submitPromise = Promise.reject(e);
+  }
+  const tracked = (async () => {
+    let jobId;
+    try {
+      const sub = await submitPromise;
+      jobId = sub.jobId;
+      log("info", `[kurier-bg] ${label} submitted job=${jobId}`);
+    } catch (e) {
+      log("warn", `[kurier-bg] ${label} submit failed (${e.code || e.message}) — local proof only`);
+      return;
+    }
+    try {
+      const res = await kurier.waitFinalized(jobId, kurier.cfg.kurierWaitBudgetMs);
+      log("info", `[kurier-bg] ${label} job=${jobId} status=${res.status}${res.ref ? " ref=" + res.ref : ""}`);
+    } catch (e) {
+      log("warn", `[kurier-bg] ${label} finalize tracking failed (${e.code || e.message})`);
+    }
+  })();
+  tracked.catch(() => { /* background tracking must never crash the process */ });
+  return submitPromise;
+}
+
+// Race a submit promise against a short deadline and return the on-chain
+// reference carried by the SUBMIT response itself, or null. This never
+// waits for finalization — it only harvests data that arrives with the
+// initial submit call (bounded by timeoutMs, target < 2s).
+async function quickSubmitRef(submitPromise, timeoutMs) {
+  try {
+    const sub = await Promise.race([
+      submitPromise,
+      new Promise((resolve) => {
+        const t = setTimeout(() => resolve(null), timeoutMs);
+        if (t.unref) t.unref();
+      }),
+    ]);
+    return sub ? extractRef(sub.raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+module.exports = { KurierClient, submitTracked, quickSubmitRef, extractRef };

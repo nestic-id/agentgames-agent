@@ -1,19 +1,24 @@
 "use strict";
 // Steal the VFY: committed policy + publicInputsHash + turn handler.
-// Policy = STEAL-STRATEGY.md's shipped policy, which is EXACTLY the
-// vfy-policy circuit's decision list with STRATEGY_PARAMS=[10,0,0,0,0,0,0,0]
-// (circuit semantics reverse-engineered 13 Nov 2026 — see WITNESS-NOTES.md):
-//   circuit: if selfBalance < params[1] -> FORTIFY;
-//            elif opponentBalance <= params[2] || params[3]==1 -> HOLD;
-//            else EXTRACT with amount == params[0] (exactly, NOT capped
-//            by the opponent balance — the resolver caps the actual take;
-//            the circuit rejects amount != params[0] at its line 149).
-//   With params[1..3] = 0 that reduces to: EXTRACT 10 every turn;
-//   HOLD only when opponent balance == 0. FORTIFY branches exist ONLY
-//   behind cfg.fortifyBlocks (FORTIFY_BLOCKS env, default false) and are
-//   DISABLED in the registered commitment (params[1]=0) — enabling them
-//   without re-registering a commitment with params[1] > selfBalance
-//   semantics would produce unprovable turns.
+// Policy = EXACTLY the vfy-policy circuit's decision list
+// (WITNESS-NOTES.md, verified by probe: lines ~140/~149), driven by the
+// deployed STRATEGY_PARAMS from env — in strict priority order:
+//   1) selfBalance < params[1] -> FORTIFY (amount 0). Wins over every
+//      other branch, even opponentBalance == 0.
+//   2) opponentBalance <= params[2] || params[3]==1 -> HOLD (amount 0).
+//   3) else EXTRACT with amount == params[0] EXACTLY (NOT capped by the
+//      opponent balance — the resolver caps the actual take; the circuit
+//      rejects amount != params[0] at its line 149).
+// With the deployed params [10,70,0,0,0,0,0,0] this is: FORTIFY whenever
+// selfBalance < 70, HOLD only at opponentBalance == 0, else EXTRACT 10.
+// Any deviation from this list makes the turn UNPROVABLE: the witness
+// assert fails, the proof pipeline errors, and the turn goes out without
+// a proof (platform: invalid proof, -2, HOLD substitute). The old
+// EXTRACT-always policy was correct only for params[1] = 0; it silently
+// broke every turn with selfBalance < 70 after the [10,70] redeploy
+// (see evaluation Round 01, 14 Nov 2026). There is no turn-based branch
+// in the circuit — endgame FORTIFY conditions must never be added here,
+// they cannot be proven.
 //
 // Schema fixes made permanent 13 Nov 2026 (post-practice; both were
 // proven against the live platform in practice session 2):
@@ -28,30 +33,31 @@
 const crypto = require("crypto");
 const { keccak256 } = require("js-sha3");
 const proofMod = require("./proof");
+const { submitTracked, quickSubmitRef } = require("./kurier");
 const { buildWitness } = require("./witness");
 const { parseBig } = require("./gatekeeper");
 
 const ACTION_CODES = { HOLD: 0, FORTIFY: 1, EXTRACT: 2 };
 
+function strategyParams(cfg) {
+  try {
+    const p = JSON.parse(cfg.strategyParamsJson || "");
+    if (Array.isArray(p) && p.length === 8) return p.map((v) => BigInt(v));
+  } catch (e) { /* fall through to the default below */ }
+  return [10n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];
+}
+
 function policy(state, cfg) {
-  const turn = state.turn;
   const self = state.selfBalance;
   const opp = state.opponentBalance;
-  if (opp <= 0n) return { type: "HOLD" };
-  if (cfg.fortifyBlocks) {
-    const E = BigInt(cfg.stealExtractCap);
-    const C = BigInt(cfg.stealFortifyCost);
-    const minE = self < E ? self : E;
-    if (turn === 20 && self > opp && C < minE) return { type: "FORTIFY" };
-    if (turn >= 18 && self > opp && self < E && C < self) return { type: "FORTIFY" };
-  }
-  // EXTRACT amount is EXACTLY the cap (= circuit params[0] = 10): the
-  // circuit asserts amount == params[0] even when the opponent balance is
-  // smaller (verified: opp=5, amount=10 proves; amount=5 fails line 149).
-  // The game resolver steals "up to N", so naming the full cap is also
-  // the game-correct action (SPEC §5.1).
-  const cap = BigInt(cfg.stealExtractCap);
-  return { type: "EXTRACT", amount: cap };
+  const params = strategyParams(cfg);
+  // Circuit decision list, strict priority (see header). params[0] is the
+  // EXTRACT amount, params[1] the FORTIFY threshold, params[2]/params[3]
+  // the HOLD conditions — all read from the deployed STRATEGY_PARAMS so
+  // the policy can never drift from the registered commitment.
+  if (self < params[1]) return { type: "FORTIFY" };
+  if (opp <= params[2] || params[3] === 1n) return { type: "HOLD" };
+  return { type: "EXTRACT", amount: params[0] };
 }
 
 function bytes32(v) {
@@ -158,17 +164,17 @@ async function handleStealTurn(envelope, deps) {
       resp.public_signals = publicSignals;
       log("info", `steal match=${envelope.matchId} turn=${state.turn} proof in ${ms}ms`);
       if (kurier && kurier.enabled) {
-        const waitBudget = Math.min(cfg.kurierWaitBudgetMs, Math.max(0, cfg.stealRespondByMs - elapsed() - 500));
-        if (waitBudget > 0) {
-          try {
-            const { jobId } = await kurier.submitProof({ vkHash: cfg.stealVkHash, proof, publicSignals });
-            const res = await kurier.waitFinalized(jobId, waitBudget);
-            if (res.ref) resp.policyProof.proofReference = res.ref;
-            log("info", `steal match=${envelope.matchId} turn=${state.turn} kurier job=${jobId} status=${res.status}`);
-          } catch (e) {
-            log("warn", `steal kurier failed (${e.code || e.message}) — local proof only`);
-          }
-        }
+        // Background submission (same decoupling as gatekeeper.js):
+        // finalization is tracked with [kurier-bg] logging and NEVER
+        // awaited here. proofReference is filled ONLY from a reference
+        // carried by the fast submit response itself (raced against
+        // cfg.kurierSubmitRaceMs, target < 2s); previously it was taken
+        // from the finalized job status after waiting up to ~24s — and
+        // in R02 every submission failed KURIER_HTTP, so the field was
+        // never set in scored play anyway.
+        const submitPromise = submitTracked(kurier, log, `steal match=${envelope.matchId} turn=${state.turn}`, { vkHash: cfg.stealVkHash, proof, publicSignals });
+        const ref = await quickSubmitRef(submitPromise, cfg.kurierSubmitRaceMs);
+        if (ref) resp.policyProof.proofReference = ref;
       }
     } catch (e) {
       // Proof pipeline failure (the vfy-policy semantics are SOLVED — see

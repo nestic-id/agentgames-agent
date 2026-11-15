@@ -61,6 +61,7 @@ function loadConfig(overrides = {}) {
     kurierApiKey: str("KURIER_API_KEY", ""),
     kurierBaseUrl: str("KURIER_BASE_URL", "https://api.kurier.xyz/api/v1"),
     kurierWaitBudgetMs: int("KURIER_WAIT_BUDGET_MS", 40000),
+    kurierSubmitRaceMs: int("KURIER_SUBMIT_RACE_MS", 1500), // max time a response may wait for the submit call itself (never for finalization)
     kurierPollIntervalMs: int("KURIER_POLL_INTERVAL_MS", 2000),
     kurierRequestTimeoutMs: int("KURIER_REQUEST_TIMEOUT_MS", 10000),
 

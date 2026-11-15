@@ -1,9 +1,12 @@
 "use strict";
 // Proof Gatekeeper: decision engine (pure, fail-closed) + task handler
-// (decision -> seen-set -> proof -> Kurier -> signed response payload).
+// (decision -> seen-set -> proof -> signed response payload; the Kurier
+// submission runs in the BACKGROUND and never blocks the response —
+// see kurier.js submitTracked and the 15 Nov 2026 practice findings).
 // Check ORDER follows SPEC §4.3's trap table and yields its reason_codes.
 const proofMod = require("./proof");
 const { buildWitness } = require("./witness");
+const { submitTracked } = require("./kurier");
 
 function parseBig(v) {
   if (typeof v === "bigint") return v;
@@ -128,20 +131,14 @@ async function handleGatekeeperTask(task, deps) {
       response.proof = proof;
       response.public_signals = publicSignals;
       log("info", `gatekeeper task=${taskId} proof generated in ${ms}ms (local verify: ${verified})`);
-      // Kurier submission + Finalized wait, inside whatever budget remains.
+      // Kurier submission runs in the BACKGROUND (fire-and-forget): the
+      // response payload carries no Kurier-derived field, and awaiting
+      // Finalized here cost 20–31s per task (practice deadline is 15s;
+      // session 3, 15 Nov 2026: 0/7 delivery timeouts). Submission still
+      // happens for EVERY task and is tracked to Finalized with
+      // [kurier-bg] logging.
       if (kurier && kurier.enabled) {
-        const waitBudget = Math.min(cfg.kurierWaitBudgetMs, Math.max(0, cfg.gkRespondByMs - elapsed() - 1000));
-        if (waitBudget > 0) {
-          try {
-            const { jobId } = await kurier.submitProof({ vkHash: cfg.gatekeeperVkHash, proof, publicSignals });
-            const res = await kurier.waitFinalized(jobId, waitBudget);
-            log("info", `gatekeeper task=${taskId} kurier job=${jobId} status=${res.status}${res.ref ? " ref=" + res.ref : ""}`);
-          } catch (e) {
-            log("warn", `gatekeeper task=${taskId} kurier failed (${e.code || e.message}) — responding with local proof only`);
-          }
-        } else {
-          log("warn", `gatekeeper task=${taskId} no budget left for kurier — responding with local proof only`);
-        }
+        submitTracked(kurier, log, `gatekeeper task=${taskId}`, { vkHash: cfg.gatekeeperVkHash, proof, publicSignals });
       }
     }
   } catch (e) {

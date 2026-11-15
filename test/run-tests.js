@@ -182,7 +182,15 @@ function specHash({ commitment, matchId, turn, self, opp, actionCode, amount }) 
     console.log(`  ${"TOTAL".padEnd(34)} ${totC}/${totT}`);
 
     // ---- steal eval ----
-    const COMMITMENT = "0x128e6024b2ab0e8981bd91ed53c0e253c2efbe29a0fa1a5ee7c8dceb49e1d650";
+    // Commitment for the .env.test strategy (params [10,70,0,0,0,0,0,0],
+    // salt 7): computed, not hardcoded, so the circuit's line-72 assert
+    // (commitment == Poseidon(params..., salt)) holds and REAL Groth16
+    // proofs are generated + verified in this eval. .env.test MUST track
+    // the deployed STRATEGY_PARAMS or these proofs fail exactly like the
+    // platform's would.
+    const { buildPoseidon } = require("circomlibjs");
+    const poseidon = await buildPoseidon();
+    const COMMITMENT = "0x" + poseidon.F.toObject(poseidon([[10n, 70n, 0n, 0n, 0n, 0n, 0n, 0n], 7n].flat())).toString(16).padStart(64, "0");
     const mkTurn = (stateOver = {}) => ({
       protocolVersion: "v1", eventId: "steal-the-vfy", mode: "competition",
       matchId: "9f4e1b2a-1111-2222-3333-444455556666", turn: 3,
@@ -194,12 +202,18 @@ function specHash({ commitment, matchId, turn, self, opp, actionCode, amount }) 
       const r1 = await post(base, "/agent/steal", turn);
       const j = r1.json || {};
       const expectedHash = specHash({ commitment: COMMITMENT, matchId: turn.matchId, turn: 3, self: "95", opp: "105", actionCode: 2, amount: 10 });
-      record("steal turn (opp=105) -> EXTRACT 10, echo + hash + key",
+      let proofVerified = false;
+      if (j.proof && Array.isArray(j.public_signals)) {
+        proofVerified = await proofMod.verifyLocal(cfg, "vfy-policy", j.public_signals, j.proof, log);
+      }
+      record("steal turn (opp=105) -> EXTRACT 10, echo + hash + key + REAL proof verified vs VK",
         r1.status === 200 && j.action && j.action.type === "EXTRACT" && j.action.amount === 10 &&
         j.matchId === turn.matchId && j.turn === 3 &&
         j.policyProof && j.policyProof.publicInputsHash === expectedHash &&
-        typeof j.idempotencyKey === "string" && j.idempotencyKey.length > 0 && r1.sigOk,
-        `hash match=${j.policyProof && j.policyProof.publicInputsHash === expectedHash}, proof attached=${!!j.proof} (known line-75 blocker if false)`);
+        typeof j.idempotencyKey === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(j.idempotencyKey) && r1.sigOk &&
+        !!j.proof && Array.isArray(j.public_signals) && j.public_signals.length === 9 && proofVerified,
+        `hash match=${j.policyProof && j.policyProof.publicInputsHash === expectedHash}, key=${j.idempotencyKey}, proof attached=${!!j.proof}, vk verify=${proofVerified}`);
       const r2 = await post(base, "/agent/steal", turn);
       record("steal idempotencyKey unique per response",
         !!(r2.json && r2.json.idempotencyKey && r2.json.idempotencyKey !== j.idempotencyKey));
@@ -207,22 +221,160 @@ function specHash({ commitment, matchId, turn, self, opp, actionCode, amount }) 
     {
       const r = await post(base, "/agent/steal", mkTurn({ opponentBalance: "0" }));
       const j = r.json || {};
-      record("steal turn (opp=0) -> HOLD, amount field omitted",
-        r.status === 200 && j.action && j.action.type === "HOLD" && !("amount" in j.action),
-        `got ${j.action && j.action.type}`);
+      let holdVerified = false;
+      if (j.proof && Array.isArray(j.public_signals)) {
+        holdVerified = await proofMod.verifyLocal(cfg, "vfy-policy", j.public_signals, j.proof, log);
+      }
+      record("steal turn (opp=0) -> HOLD, amount field omitted, REAL proof verified",
+        r.status === 200 && j.action && j.action.type === "HOLD" && !("amount" in j.action) &&
+        !!j.proof && holdVerified,
+        `got ${j.action && j.action.type}, proof attached=${!!j.proof}, vk verify=${holdVerified}`);
     }
     {
       const r = await post(base, "/agent/steal", mkTurn({ opponentBalance: "4" }));
       const j = r.json || {};
-      record("steal turn (opp=4) -> EXTRACT capped by balance (4)",
-        r.status === 200 && j.action && j.action.type === "EXTRACT" && j.action.amount === 4,
+      record("steal turn (opp=4) -> EXTRACT amount == params[0] (10), NOT capped by balance",
+        r.status === 200 && j.action && j.action.type === "EXTRACT" && j.action.amount === 10 && !!j.proof,
+        `got ${j.action && j.action.type} ${j.action && j.action.amount}, proof attached=${!!j.proof}`);
+    }
+    {
+      // params[1]=70: selfBalance < 70 MUST be FORTIFY (circuit branch 1,
+      // wins over every other branch) with a REAL proof verified vs VK.
+      // Regression: the old EXTRACT-always policy made this turn
+      // unprovable (witness assert fail -> no proof -> platform -2).
+      const r = await post(base, "/agent/steal", mkTurn({ selfBalance: "50" }));
+      const j = r.json || {};
+      let verified = false;
+      if (j.proof && Array.isArray(j.public_signals)) {
+        verified = await proofMod.verifyLocal(cfg, "vfy-policy", j.public_signals, j.proof, log);
+      }
+      record("steal turn (self=50 < 70) -> FORTIFY, REAL proof verified",
+        r.status === 200 && j.action && j.action.type === "FORTIFY" && !("amount" in j.action) &&
+        !!j.proof && verified,
+        `got ${j.action && j.action.type}, proof attached=${!!j.proof}, vk verify=${verified}`);
+    }
+    {
+      // Branch 1 beats branch 2: self < 70 fortifies even at opp == 0.
+      const r = await post(base, "/agent/steal", mkTurn({ selfBalance: "69", opponentBalance: "0" }));
+      const j = r.json || {};
+      let verified = false;
+      if (j.proof && Array.isArray(j.public_signals)) {
+        verified = await proofMod.verifyLocal(cfg, "vfy-policy", j.public_signals, j.proof, log);
+      }
+      record("steal turn (self=69, opp=0) -> FORTIFY, not HOLD",
+        r.status === 200 && j.action && j.action.type === "FORTIFY" && !!j.proof && verified,
+        `got ${j.action && j.action.type}, vk verify=${verified}`);
+    }
+    {
+      // Boundary is strict <: self == 70 still extracts.
+      const r = await post(base, "/agent/steal", mkTurn({ selfBalance: "70" }));
+      const j = r.json || {};
+      record("steal turn (self=70) -> EXTRACT 10 (boundary, strict <)",
+        r.status === 200 && j.action && j.action.type === "EXTRACT" && j.action.amount === 10 && !!j.proof,
         `got ${j.action && j.action.type} ${j.action && j.action.amount}`);
+    }
+    {
+      const t = mkTurn();
+      delete t.strategyCommitment; // practice-shaped envelope: no commitment field
+      const r = await post(base, "/agent/steal", t);
+      const j = r.json || {};
+      record("steal envelope without commitment -> fail-closed HOLD, hash still a string, key is plain UUID",
+        r.status === 200 && j.action && j.action.type === "HOLD" &&
+        j.policyProof && typeof j.policyProof.publicInputsHash === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(j.idempotencyKey || ""),
+        `hash type=${j.policyProof && typeof j.policyProof.publicInputsHash}, key=${j.idempotencyKey}`);
     }
     {
       const r = await post(base, "/agent/steal", { protocolVersion: "v1", eventId: "steal-the-vfy" });
       const j = r.json || {};
       record("steal malformed envelope -> fail-closed HOLD",
         r.status === 200 && j.action && j.action.type === "HOLD", `got ${j.action && j.action.type}`);
+    }
+
+    // ---- kurier decoupling (regression, 15 Nov 2026) ----
+    // Practice session 3: handlers AWAITED Kurier Finalized before
+    // responding (20–31s vs the 15s practice deadline -> 0/7 delivery
+    // timeouts). A second app runs with a FAKE Kurier client patched
+    // onto deps: submissions/finalization are slow or hanging, and the
+    // handlers must still respond fast while the background tracker
+    // ([kurier-bg] logs) completes the submission on its own.
+    {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const waitFor = async (fn, timeoutMs) => {
+        const s = Date.now();
+        while (Date.now() - s < timeoutMs) { if (fn()) return true; await sleep(50); }
+        return fn();
+      };
+      const tmpData2 = fs.mkdtempSync(path.join(os.tmpdir(), "agentgames-kurier-"));
+      const cfg2 = loadConfig({ port: 0, host: "127.0.0.1", dataDir: tmpData2, kurierApiKey: "test-key", kurierSubmitRaceMs: 800 });
+      const bgLines = [];
+      const log2 = (lvl, msg) => { bgLines.push(String(msg)); };
+      const app2 = createApp(cfg2, log2);
+      const fake = { submitDelay: 0, finDelay: 0, raw: {}, submitCalls: [], finCalls: [] };
+      app2.deps.kurier.submitProof = async (args) => {
+        fake.submitCalls.push(args);
+        await sleep(fake.submitDelay);
+        return { jobId: "job-fake-1", raw: fake.raw };
+      };
+      app2.deps.kurier.waitFinalized = async (jobId, budget) => {
+        fake.finCalls.push({ jobId, budget });
+        await sleep(fake.finDelay);
+        return { status: "Finalized", ref: "0xrefbg", jobId };
+      };
+      await new Promise((r) => app2.server.listen(0, "127.0.0.1", r));
+      const base2 = `http://127.0.0.1:${app2.server.address().port}`;
+      try {
+        // (A) gatekeeper: submit takes 600ms, finalization 150ms — the
+        // response must land on proof time alone, and the background
+        // tracker must still submit once and log Finalized.
+        fake.submitDelay = 600; fake.finDelay = 150; fake.raw = { jobId: "job-fake-1" };
+        fake.submitCalls.length = 0; fake.finCalls.length = 0;
+        let tA = Date.now();
+        const rA = await post(base2, "/agent/gatekeeper", mkTask({}, { task_id: "gk_kurier_bg" }));
+        const durA = Date.now() - tA;
+        const bgDoneA = await waitFor(() => bgLines.some((l) => l.includes("[kurier-bg]") && l.includes("status=Finalized")), 3000);
+        record("kurier decoupled: gatekeeper responds without waiting for Kurier, background tracks to Finalized",
+          rA.status === 200 && rA.json && rA.json.decision === "APPROVE" && !!rA.json.proof && durA < 3000 &&
+          fake.submitCalls.length === 1 && fake.submitCalls[0].vkHash === cfg2.gatekeeperVkHash &&
+          fake.finCalls.length === 1 && fake.finCalls[0].budget === cfg2.kurierWaitBudgetMs && bgDoneA,
+          `dur=${durA}ms, submits=${fake.submitCalls.length}, finBudget=${fake.finCalls[0] && fake.finCalls[0].budget}, bgFinalizedLogged=${bgDoneA}`);
+
+        // (B) gatekeeper: finalization HANGS for 60s — response must
+        // still be fast (this is the exact session-3 failure shape).
+        fake.submitDelay = 10; fake.finDelay = 60000;
+        let tB = Date.now();
+        const rB = await post(base2, "/agent/gatekeeper", mkTask({}, { task_id: "gk_kurier_hang" }));
+        const durB = Date.now() - tB;
+        record("kurier decoupled: gatekeeper fast even when Kurier finalization hangs 60s",
+          rB.status === 200 && rB.json && rB.json.decision === "APPROVE" && !!rB.json.proof && durB < 3000,
+          `dur=${durB}ms`);
+
+        // (C) steal: the submit response itself carries a reference ->
+        // proofReference is filled from that fast submit call.
+        fake.submitDelay = 50; fake.finDelay = 100; fake.raw = { jobId: "job-fake-1", txHash: "0xdeadbeef" };
+        let tC = Date.now();
+        const rC = await post(base2, "/agent/steal", mkTurn());
+        const durC = Date.now() - tC;
+        const jC = rC.json || {};
+        record("kurier decoupled: steal proofReference harvested from fast submit response",
+          rC.status === 200 && jC.action && jC.action.type === "EXTRACT" && !!jC.proof &&
+          jC.policyProof && jC.policyProof.proofReference === "0xdeadbeef" && durC < 3000,
+          `dur=${durC}ms, proofReference=${jC.policyProof && jC.policyProof.proofReference}`);
+
+        // (D) steal: submit slower than the race bound -> response goes
+        // out without proofReference and without waiting for the submit.
+        fake.submitDelay = 5000; fake.raw = {};
+        let tD = Date.now();
+        const rD = await post(base2, "/agent/steal", mkTurn());
+        const durD = Date.now() - tD;
+        const jD = rD.json || {};
+        record("kurier decoupled: steal does not wait for a slow Kurier submit",
+          rD.status === 200 && jD.action && jD.action.type === "EXTRACT" && !!jD.proof &&
+          !(jD.policyProof && jD.policyProof.proofReference) && durD < 3000,
+          `dur=${durD}ms, proofReference=${jD.policyProof && jD.policyProof.proofReference}`);
+      } finally {
+        app2.server.close();
+      }
     }
   } finally {
     server.close();
