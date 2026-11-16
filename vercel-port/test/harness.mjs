@@ -159,6 +159,26 @@ try {
     record("gatekeeper malformed envelope -> fail-closed REJECT",
       r.status === 200 && r.json && r.json.decision === "REJECT", `got ${r.json && r.json.decision}/${r.json && r.json.reason_code}, ${r.ms}ms`);
   }
+  // ---- gatekeeper salt: fresh random per task (pecker construction,
+  // 16 Nov 2026). Two identical tasks (same task_id + inputs; only the
+  // proof_tx differs, and proof_tx is not a circuit input) must yield a
+  // DIFFERENT public_signals[0] (evaluationCommitment binds the salt),
+  // IDENTICAL public_signals[1..12], and both proofs must verify locally.
+  {
+    const ra = await post(base, "/agent", mkTask());
+    const rb = await post(base, "/agent", mkTask());
+    const ja = ra.json || {}, jb = rb.json || {};
+    const sa = ja.public_signals || [], sb = jb.public_signals || [];
+    let vA = false, vB = false;
+    if (ja.proof && sa.length === 13) vA = await proofMod.verifyLocal("gatekeeper", sa, ja.proof);
+    if (jb.proof && sb.length === 13) vB = await proofMod.verifyLocal("gatekeeper", sb, jb.proof);
+    const restSame = sa.length === 13 && sb.length === 13 &&
+      JSON.stringify(sa.slice(1)) === JSON.stringify(sb.slice(1));
+    record("gatekeeper salt fresh per task: [0] differs, [1..12] identical, both proofs verify",
+      ja.decision === "APPROVE" && jb.decision === "APPROVE" &&
+      sa.length === 13 && sb.length === 13 && sa[0] !== sb[0] && restSame && vA === true && vB === true,
+      `[0] differs=${sa[0] !== sb[0]}, [1..12] identical=${restSame}, verifyA=${vA}, verifyB=${vB}`);
+  }
 
   // ---- task archive (16 Nov 2026): write + signed read-back + 401 ----
   async function getArchive(rel, { signed = true } = {}) {

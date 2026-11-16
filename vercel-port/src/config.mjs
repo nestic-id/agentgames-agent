@@ -37,6 +37,8 @@ export function loadConfig(overrides = {}) {
     seenRule: str("SEEN_RULE", "accepted"), // accepted | all
     decisionApproveValue: str("DECISION_APPROVE_VALUE", "1"),
     decisionRejectValue: str("DECISION_REJECT_VALUE", "0"),
+    // Retained for parity with the live agent; the Vercel Gatekeeper path
+    // no longer consumes it (fresh random salt per task since 16 Nov 2026).
     gatekeeperSalt: str("GATEKEEPER_SALT", "0"),
     gkRespondByMs: int("GK_RESPOND_BY_MS", 50000), // hard platform deadline is 60s
 

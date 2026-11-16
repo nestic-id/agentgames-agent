@@ -12,6 +12,13 @@
 //   - Response shape mirrors pecker: { decision, reason_code, proof_tx,
 //     proof, public_signals } — the same fields the live agent emits, in
 //     pecker's order. PROOF_REUSED carries no proof (SPEC §4.2).
+//   - Witness salt is FRESH RANDOM PER TASK, pecker's exact construction
+//     (gatekeeper-task.mjs:18: BigInt('0x'+randomBytes(31)) as a decimal
+//     string) — NOT the constant cfg.gatekeeperSalt / env GATEKEEPER_SALT
+//     the live agent used. One-variable change, 16 Nov 2026 (see
+//     witness-diff-pecker-2026-11-16.md §6). cfg.gatekeeperSalt remains in
+//     config for parity but is no longer consumed on this path.
+import { randomBytes } from "node:crypto";
 import * as proofMod from "./proof.mjs";
 import { buildWitness } from "./witness.mjs";
 import { snapshotFor } from "./seen.mjs";
@@ -129,10 +136,14 @@ export async function handleGatekeeperTask(task, deps) {
 
   // --- proof pipeline (best effort inside the response budget) ---
   try {
+    // Fresh 248-bit salt per task, pecker's exact construction
+    // (31 random bytes -> hex -> BigInt -> decimal string; always < the
+    // BN254 prime, and the witness `decimal` encoder applies mod p anyway).
+    const freshSalt = BigInt("0x" + randomBytes(31).toString("hex")).toString();
     const witnessCtx = {
       task,
       decisionValue: d.decision === "APPROVE" ? cfg.decisionApproveValue : cfg.decisionRejectValue,
-      env: { GATEKEEPER_SALT: cfg.gatekeeperSalt },
+      env: { GATEKEEPER_SALT: freshSalt },
     };
     const { input } = buildWitness("gatekeeper", witnessCtx);
     const proveBudget = Math.min(cfg.proofTimeoutMs, Math.max(1000, cfg.gkRespondByMs - elapsed()));
