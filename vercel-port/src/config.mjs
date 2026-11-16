@@ -55,6 +55,12 @@ export function loadConfig(overrides = {}) {
     seenBackend: str("SEEN_BACKEND", "auto"),
     seenFilePath: str("SEEN_FILE_PATH", ""),
 
+    // Task-payload archive backend: auto | blob | memory | off
+    //   auto  -> blob when BLOB_READ_WRITE_TOKEN is set, else off
+    // Archiving is fail-open and raced against archiveTimeoutMs.
+    archiveBackend: str("ARCHIVE_BACKEND", "auto"),
+    archiveTimeoutMs: int("ARCHIVE_TIMEOUT_MS", 2000),
+
     logLevel: str("LOG_LEVEL", "info"),
   };
   Object.assign(cfg, overrides);

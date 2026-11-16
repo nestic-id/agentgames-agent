@@ -24,6 +24,7 @@ for (const line of envTest.split(/\r?\n/)) {
   if (m && !line.trim().startsWith("#")) process.env[m[1]] = m[2];
 }
 process.env.SEEN_BACKEND = "memory"; // deterministic, no Blob locally
+process.env.ARCHIVE_BACKEND = "memory"; // archive read-back exercised locally
 const TEST_SECRET = process.env.AGENT_GAMES_HMAC_SECRET;
 const PARAMS = JSON.parse(process.env.STRATEGY_PARAMS).map((v) => BigInt(v));
 const SALT = BigInt(process.env.STRATEGY_SALT);
@@ -159,6 +160,38 @@ try {
       r.status === 200 && r.json && r.json.decision === "REJECT", `got ${r.json && r.json.decision}/${r.json && r.json.reason_code}, ${r.ms}ms`);
   }
 
+  // ---- task archive (16 Nov 2026): write + signed read-back + 401 ----
+  async function getArchive(rel, { signed = true } = {}) {
+    const headers = {};
+    if (signed) headers["x-agent-games-signature"] = signBody(TEST_SECRET, Buffer.from(rel, "utf8"));
+    const req = new Request("http://localhost/agent?archive=" + encodeURIComponent(rel), { method: "GET", headers });
+    const res = await api.GET(req);
+    let j = null;
+    try { j = await res.json(); } catch (e) { /* keep null */ }
+    return { status: res.status, json: j };
+  }
+  {
+    const task = mkTask({}, { task_id: "gk_archive_e2e" });
+    const r = await post(base, "/agent", task);
+    const rel = "archive/gatekeeper/gk_archive_e2e.json";
+    const got = await getArchive(rel);
+    const rec = got.json || {};
+    record("archive: gatekeeper task archived + signed GET read-back matches (proof flagged)",
+      r.status === 200 && r.json && r.json.decision === "APPROVE" &&
+      got.status === 200 && rec.track === "gatekeeper" && rec.id === "gk_archive_e2e" &&
+      rec.hasProof === true && rec.response && rec.response.decision === "APPROVE" && !!rec.response.proof &&
+      rec.request && rec.request.task_id === "gk_archive_e2e" && typeof rec.timestamp === "string",
+      `getStatus=${got.status}, hasProof=${rec.hasProof}`);
+    const unauth = await getArchive(rel, { signed: false });
+    record("archive: GET without signature -> 401", unauth.status === 401, `status=${unauth.status}`);
+    const badSig = await api.GET(new Request("http://localhost/agent?archive=" + encodeURIComponent(rel), {
+      method: "GET", headers: { "x-agent-games-signature": "0".repeat(64) },
+    }));
+    record("archive: GET with bad signature -> 401", badSig.status === 401, `status=${badSig.status}`);
+    const missing = await getArchive("archive/gatekeeper/does_not_exist.json");
+    record("archive: GET missing record (signed) -> 404", missing.status === 404, `status=${missing.status}`);
+  }
+
   // ---- seen-seed (pre-Vercel local era migration, 16 Nov 2026) ----
   {
     const seenMod = await import("../src/seen.mjs");
@@ -226,6 +259,14 @@ try {
     const r2 = await post(base, "/agent", turn);
     record("steal retry -> byte-identical body (deterministic idempotency)",
       r2.text === r1.text, `identical=${r2.text === r1.text}, ${r2.ms}ms`);
+    const srel = `archive/steal/${MATCH}-3.json`;
+    const sgot = await getArchive(srel);
+    const srec = sgot.json || {};
+    record("archive: steal turn archived + signed GET read-back (proof inside policyProof flagged)",
+      sgot.status === 200 && srec.track === "steal" && srec.hasProof === true &&
+      srec.response && srec.response.action && srec.response.action.type === "EXTRACT" &&
+      !!(srec.response.policyProof && srec.response.policyProof.proof),
+      `getStatus=${sgot.status}, hasProof=${srec.hasProof}`);
   }
   if (PARAMS[1] > 0n) {
     const self = (PARAMS[1] - 20n).toString();
@@ -251,6 +292,35 @@ try {
     const j = r.json || {};
     record("steal malformed envelope -> fail-closed HOLD",
       r.status === 200 && j.action && j.action.type === "HOLD", `got ${j.action && j.action.type}, ${r.ms}ms`);
+  }
+
+  // ---- archive fail-open: a broken/hanging archive must never change
+  // or materially delay the answer (direct handle() with rigged deps) ----
+  {
+    const handlerMod = await import("../src/handler.mjs");
+    const cfgMod = await import("../src/config.mjs");
+    const seenMod2 = await import("../src/seen.mjs");
+    const logMod = await import("../src/log.mjs");
+    const mkDeps = (archive, archiveTimeoutMs) => {
+      const cfg = cfgMod.loadConfig({ archiveTimeoutMs });
+      return { cfg, log: logMod.makeLogger("error"), store: seenMod2.createSeenStore({ seenBackend: "memory" }, logMod.makeLogger("error")), archive };
+    };
+    const directPost = async (deps, task) => {
+      const raw = Buffer.from(JSON.stringify(task), "utf8");
+      return handlerMod.handle(raw, signBody(TEST_SECRET, raw), deps);
+    };
+    const throwing = { backend: "broken", put: async () => { throw new Error("blob down"); }, get: async () => null };
+    const rA = await directPost(mkDeps(throwing, 500), mkTask({}, { task_id: "gk_archive_failopen" }));
+    const jA = JSON.parse(rA.body);
+    record("archive fail-open: throwing archive store -> handler still answers APPROVE + proof",
+      rA.status === 200 && jA.decision === "APPROVE" && !!jA.proof, `got ${jA.decision}/${jA.reason_code}`);
+    const hanging = { backend: "hanging", put: () => new Promise(() => {}), get: async () => null };
+    const tH = Date.now();
+    const rB = await directPost(mkDeps(hanging, 150), mkTask({}, { task_id: "gk_archive_hang" }));
+    const dtH = Date.now() - tH;
+    const jB = JSON.parse(rB.body);
+    record("archive fail-open: hanging archive store -> answer not blocked (timeout race)",
+      rB.status === 200 && jB.decision === "APPROVE" && dtH < 5000, `got ${jB.decision}, total ${dtH}ms`);
   }
 
   // ---- the actual Vercel entry (Web-standard Request/Response) ----

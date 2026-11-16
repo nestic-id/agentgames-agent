@@ -11,6 +11,7 @@ import { loadConfig } from "./config.mjs";
 import * as hmac from "./hmac.mjs";
 import { makeLogger } from "./log.mjs";
 import { createSeenStore } from "./seen.mjs";
+import { createArchiveStore, archiveResponse } from "./archive.mjs";
 import { handleGatekeeperTask } from "./gatekeeper.mjs";
 import { handleStealTurn } from "./steal.mjs";
 
@@ -20,7 +21,8 @@ export function getDeps(overrides = {}) {
   const cfg = loadConfig(overrides.cfg || {});
   const log = makeLogger(cfg.logLevel);
   const store = createSeenStore(cfg, log);
-  const deps = { cfg, store, log };
+  const archive = createArchiveStore(cfg, log);
+  const deps = { cfg, store, log, archive };
   if (Object.keys(overrides).length === 0) depsCache = deps;
   return deps;
 }
@@ -62,18 +64,31 @@ export async function handle(raw, signatureHeader, deps) {
 
   const isSteal = body && (body.eventId === "steal-the-vfy" || body.matchId !== undefined);
   const isGatekeeper = body && typeof body.type === "string" && body.type.includes("proof-gatekeeper");
+  const track = isSteal ? "steal" : "gatekeeper";
+  let response;
   try {
-    if (isSteal) return sendJson(200, await handleStealTurn(body, deps));
-    if (isGatekeeper) return sendJson(200, await handleGatekeeperTask(body, deps));
+    if (isSteal) response = await handleStealTurn(body, deps);
+    else if (isGatekeeper) response = await handleGatekeeperTask(body, deps);
     // Unknown payload shape: fail closed to the gatekeeper default,
     // exactly like the live agent's /agent route.
-    return sendJson(200, await handleGatekeeperTask(body, deps));
+    else response = await handleGatekeeperTask(body, deps);
   } catch (e) {
     // Handlers are designed not to throw; last-resort fail-closed.
     log("error", `handler crashed: ${e.stack || e.message}`);
     if (isSteal) {
-      return sendJson(200, await handleStealTurn(null, deps).catch(() => ({ action: { type: "HOLD" } })));
+      response = await handleStealTurn(null, deps).catch(() => ({ action: { type: "HOLD" } }));
+    } else {
+      response = { decision: "REJECT", reason_code: cfg.fallbackRejectReasonCode };
     }
-    return sendJson(200, { decision: "REJECT", reason_code: cfg.fallbackRejectReasonCode });
   }
+
+  // Archive the final response (fail-open, raced — see archive.mjs).
+  // This is the audit trail for scored rounds: whether the response
+  // carried a proof is recorded alongside the raw task and response.
+  const archiveId = isSteal
+    ? `${body && body.matchId !== undefined ? body.matchId : "unknown"}-${body && body.turn !== undefined ? body.turn : "x"}`
+    : (body && body.task_id) || "unknown";
+  await archiveResponse(deps, { track, id: archiveId, request: body, response });
+
+  return sendJson(200, response);
 }
