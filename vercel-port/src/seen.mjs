@@ -30,25 +30,28 @@
 // the live store's "unreadable -> start empty, detection degraded" stance.
 import fs from "node:fs";
 import path from "node:path";
+import { SEED_ACCEPTED, SEED_ALL } from "./seen-seed.mjs";
 
 const safeSeg = (s) => encodeURIComponent(String(s)).slice(0, 200);
 
 class MemorySeen {
   constructor() {
     this.backend = "memory";
-    this.accepted = new Set();
-    this.all = new Set();
+    // Seed (pre-Vercel local era) is an initial truth source; keys are
+    // lowercased hex hashes, consistent with BlobSeen pathnames.
+    this.accepted = new Set(SEED_ACCEPTED);
+    this.all = new Set(SEED_ALL);
   }
-  async hasAccepted(tx) { return this.accepted.has(String(tx)); }
-  async hasAll(tx) { return this.all.has(String(tx)); }
+  async hasAccepted(tx) { return this.accepted.has(String(tx).toLowerCase()); }
+  async hasAll(tx) { return this.all.has(String(tx).toLowerCase()); }
   async recordAll(tx) {
     if (tx === undefined || tx === null || tx === "") return;
-    this.all.add(String(tx));
+    this.all.add(String(tx).toLowerCase());
   }
   async recordAccepted(tx) {
     if (tx === undefined || tx === null || tx === "") return;
-    this.accepted.add(String(tx));
-    this.all.add(String(tx));
+    this.accepted.add(String(tx).toLowerCase());
+    this.all.add(String(tx).toLowerCase());
   }
 }
 
@@ -60,8 +63,8 @@ class FileSeen extends MemorySeen {
     this.log = log || (() => {});
     try {
       const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
-      for (const x of data.accepted || []) this.accepted.add(String(x));
-      for (const x of data.all || []) this.all.add(String(x));
+      for (const x of data.accepted || []) this.accepted.add(String(x).toLowerCase());
+      for (const x of data.all || []) this.all.add(String(x).toLowerCase());
     } catch (e) {
       if (e.code !== "ENOENT") this.log("warn", `seen-store file unreadable (${e.message}); starting empty`);
     }
@@ -80,8 +83,11 @@ class BlobSeen {
   constructor(log) {
     this.backend = "blob";
     this.log = log || (() => {});
-    this.cacheAll = new Set();
-    this.cacheAccepted = new Set();
+    // Seed merged into the warm cache at construction: _seen() checks the
+    // cache before list(), so seeded proof_tx resolve true even though
+    // the Blob store started empty at deploy time.
+    this.cacheAll = new Set(SEED_ALL);
+    this.cacheAccepted = new Set(SEED_ACCEPTED);
     this._blob = null;
   }
   async _api() {

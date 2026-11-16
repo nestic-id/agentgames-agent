@@ -159,6 +159,39 @@ try {
       r.status === 200 && r.json && r.json.decision === "REJECT", `got ${r.json && r.json.decision}/${r.json && r.json.reason_code}, ${r.ms}ms`);
   }
 
+  // ---- seen-seed (pre-Vercel local era migration, 16 Nov 2026) ----
+  {
+    const seenMod = await import("../src/seen.mjs");
+    const gkMod = await import("../src/gatekeeper.mjs");
+    const seedMod = await import("../src/seen-seed.mjs");
+    const GK2_TX = "0x4d84c5e935804315ab0ca81dbbacad26";
+    // Memory backend (harness backend)
+    const memStore = seenMod.createSeenStore({ seenBackend: "memory" });
+    const memAccepted = await Promise.all(seedMod.SEED_ACCEPTED.map((tx) => memStore.hasAccepted(tx)));
+    const memAll = await Promise.all(seedMod.SEED_ALL.map((tx) => memStore.hasAll(tx)));
+    record("seen-seed memory: hasAccepted true for all 5 seeded accepted",
+      memAccepted.every(Boolean) && memAccepted.length === 5 && (await memStore.hasAccepted(GK2_TX)) === true,
+      `accepted ${memAccepted.filter(Boolean).length}/5`);
+    record("seen-seed memory: hasAll true for all 19 seeded all",
+      memAll.every(Boolean) && memAll.length === 19,
+      `all ${memAll.filter(Boolean).length}/19`);
+    // Blob backend: seed lives in the warm cache, so has* resolves true
+    // without any Blob network call (cache is checked before list()).
+    const blobStore = seenMod.createSeenStore({ seenBackend: "blob" });
+    const blobAccepted = await Promise.all(seedMod.SEED_ACCEPTED.map((tx) => blobStore.hasAccepted(tx)));
+    const blobAll = await Promise.all(seedMod.SEED_ALL.map((tx) => blobStore.hasAll(tx)));
+    record("seen-seed blob: hasAccepted/hasAll true from seeded cache (5/5 + 19/19)",
+      blobAccepted.every(Boolean) && blobAll.every(Boolean),
+      `accepted ${blobAccepted.filter(Boolean).length}/5, all ${blobAll.filter(Boolean).length}/19`);
+    // decide() on a GK2 replica: every other condition valid, proof_tx seeded
+    const view = await seenMod.snapshotFor(memStore, GK2_TX);
+    const cfg = { approveReasonCode: "VALID_CONDITION", fallbackRejectReasonCode: "INVALID_INPUT", seenRule: "accepted" };
+    const d = gkMod.decide(mkTask({ proof_tx: GK2_TX }), view, cfg);
+    record("seen-seed decide: GK2 replica (valid + seeded proof_tx) -> REJECT/PROOF_REUSED",
+      d.decision === "REJECT" && d.reason_code === "PROOF_REUSED",
+      `got ${d.decision}/${d.reason_code}`);
+  }
+
   // ---- steal ----
   const poseidon = await buildPoseidon();
   const COMMITMENT = "0x" + poseidon.F.toObject(poseidon([...PARAMS, SALT])).toString(16).padStart(64, "0");
