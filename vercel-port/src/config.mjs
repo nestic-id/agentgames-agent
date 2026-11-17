@@ -32,7 +32,7 @@ export function loadConfig(overrides = {}) {
     hmacHeader: str("HMAC_HEADER", "x-agent-games-signature"),
 
     // Gatekeeper (same names/defaults as live)
-    approveReasonCode: str("APPROVE_REASON_CODE", "VALID_CONDITION"),
+    approveReasonCode: str("APPROVE_REASON_CODE", "VALID_PROOF"),
     fallbackRejectReasonCode: str("FALLBACK_REJECT_REASON_CODE", "INVALID_INPUT"),
     seenRule: str("SEEN_RULE", "accepted"), // accepted | all
     decisionApproveValue: str("DECISION_APPROVE_VALUE", "1"),

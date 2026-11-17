@@ -145,14 +145,14 @@ try {
     return r;
   }
 
-  await gkCase("VALID_CONDITION", mkTask(), "APPROVE", "VALID_CONDITION", { checkShape: true });
+  await gkCase("VALID task (approve code VALID_PROOF)", mkTask(), "APPROVE", "VALID_PROOF", { checkShape: true });
   await gkCase("VK_SUBSTITUTION", mkTask({ proof_vk: VK2 }), "REJECT", "VK_SUBSTITUTION");
   await gkCase("THRESHOLD_MISMATCH", mkTask({ public_balance: "999" }), "REJECT", "THRESHOLD_MISMATCH");
   await gkCase("EXPIRED_CONDITION", mkTask({ current_block: 8430001 }), "REJECT", "EXPIRED_CONDITION");
   await gkCase("RECIPIENT_MISMATCH", mkTask({ recipient: ADDR2 }), "REJECT", "RECIPIENT_MISMATCH");
   await gkCase("AMOUNT_OVERFLOW", mkTask({ amount: "1001" }), "REJECT", "AMOUNT_OVERFLOW");
   const reusedTx = freshTx();
-  await gkCase("VALID_CONDITION (reuse setup)", mkTask({ proof_tx: reusedTx }), "APPROVE", "VALID_CONDITION");
+  await gkCase("VALID task (reuse setup)", mkTask({ proof_tx: reusedTx }), "APPROVE", "VALID_PROOF");
   await gkCase("PROOF_REUSED", mkTask({ proof_tx: reusedTx }), "REJECT", "PROOF_REUSED", { expectProof: false });
   {
     const r = await post(base, "/agent", { type: "agent-games.proof-gatekeeper.v1", task_id: "gk_bad" });
