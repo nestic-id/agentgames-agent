@@ -41,6 +41,7 @@ class OffArchive {
   constructor() { this.backend = "off"; }
   async put() { return false; }
   async get() { return null; }
+  async list() { return []; }
 }
 
 class MemoryArchive {
@@ -51,6 +52,7 @@ class MemoryArchive {
     if (text === undefined) return null;
     try { return JSON.parse(text); } catch (e) { return null; }
   }
+  async list(prefix) { return [...this.map.keys()].filter((k) => k.startsWith(prefix)); }
 }
 
 class BlobArchive {
@@ -85,6 +87,34 @@ class BlobArchive {
       return null;
     }
   }
+  async list(prefix) {
+    try {
+      const { list } = await this._api();
+      const out = [];
+      let cursor;
+      do {
+        const res = await list({ prefix, limit: 1000, cursor });
+        for (const b of (res && res.blobs) || []) out.push(b.pathname);
+        cursor = res && res.hasMore ? res.cursor : undefined;
+      } while (cursor);
+      return out;
+    } catch (e) {
+      this.log("warn", `archive blob list failed (${e.message})`);
+      return null;
+    }
+  }
+}
+
+// List archived pathnames under a prefix (e.g. "archive/gatekeeper/").
+// Returns an array of pathnames, or null when listing is unavailable.
+// NEVER throws. Added 18 Nov 2026: the R05 dissection failed because no
+// task IDs were recorded anywhere reachable — the records existed in
+// Blob but could not be enumerated. This closes that gap.
+export async function listArchive(deps, prefix) {
+  const store = deps && deps.archive;
+  if (!store || store.backend === "off") return null;
+  if (typeof store.list !== "function") return null;
+  try { return await store.list(prefix); } catch (e) { return null; }
 }
 
 export function createArchiveStore(cfg, log) {
